@@ -22,6 +22,7 @@ export class GuildQueue {
         this.playerMessageId = null;
         this.updateInterval = null;
         this.history = [];           // last 20 tracks for AI context
+        this.currentMood = null;     // mood features of current track (from moodEngine)
         this._settingsLoaded = false;
 
         // Async init — load persisted settings from DB
@@ -204,6 +205,7 @@ export class GuildQueue {
         clearTimeout(this._saveTimer);
         this.tracks = [];
         this.currentTrack = null;
+        this.currentMood = null;
         this.history = [];
     }
 }

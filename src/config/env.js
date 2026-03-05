@@ -19,6 +19,9 @@ const optional = [
     'LAVALINK_JAVA_OPTS',
     'AI_API_KEY',
     'REQUEST_CHANNEL_ID',
+    'YOUTUBE_OAUTH_REFRESH_TOKEN',
+    'YOUTUBE_PO_TOKEN',
+    'YOUTUBE_VISITOR_DATA',
 ];
 
 function parseLavalinkNodes() {
@@ -90,6 +93,13 @@ export const config = {
     },
     appleMusicToken: process.env.APPLE_MUSIC_TOKEN || '',
     deezerKey: process.env.DEEZER_DECRYPTION_KEY || '',
+
+    // YouTube Authentication (required for VPS/datacenter IPs)
+    youtube: {
+        oauthRefreshToken: process.env.YOUTUBE_OAUTH_REFRESH_TOKEN || '',
+        poToken: process.env.YOUTUBE_PO_TOKEN || '',
+        visitorData: process.env.YOUTUBE_VISITOR_DATA || '',
+    },
 
     // AI
     aiApiKey: process.env.AI_API_KEY || '',

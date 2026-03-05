@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { detectTrackMood, getSessionMoodProfile, getAllowedNextMoods } from './moodEngine.js';
 
 let openai = null;
 
@@ -12,21 +13,69 @@ function getClient() {
 }
 
 /**
- * ═══════════════════════════════════════════════════════════════
- *  Spotify-Grade AI Recommendation Engine
- * ═══════════════════════════════════════════════════════════════
+ * ═══════════════════════════════════════════════════════════════════
+ *  AI Recommendation Engine v3 — Full Spotify Pipeline
+ * ═══════════════════════════════════════════════════════════════════
  *
- * Mirrors Spotify's recommendation pipeline:
- * 1. Session profiling — genre, mood, energy, tempo, era
- * 2. Collaborative filtering — "listeners who played X also play Y"
- * 3. Content-based filtering — same subgenre, similar BPM, mood
- * 4. Exploration vs exploitation — 60% safe / 30% discover / 10% deep
- * 5. Anti-repetition — artist cooldown, no repeats
+ * Now integrates with moodEngine + similarityEngine to provide:
+ *
+ *  1. LOCAL MOOD DETECTION — Before calling AI, we analyze the seed
+ *     track's mood/energy/valence/tempo locally using NLP. This data
+ *     is passed TO the AI, giving it precise audio feature context.
+ *
+ *  2. SESSION MOOD PROFILE — We compute the average mood across the
+ *     entire listening session, so the AI knows the user's current
+ *     emotional state, not just one song.
+ *
+ *  3. MOOD TRANSITION CONSTRAINTS — We tell the AI which moods are
+ *     acceptable next, based on smooth transition rules. This prevents
+ *     jarring jumps like sad → party EDM.
+ *
+ *  4. STRUCTURED OUTPUT — AI returns detailed analysis with mood tags,
+ *     which we can then use for post-processing and re-ranking.
+ *
+ * Pipeline:
+ *   Input track → moodEngine.detectMood() → build AI context
+ *   → AI generates candidates with mood-awareness
+ *   → similarityEngine.rankCandidates() filters after resolution
  */
 
+// ── Artist → scene knowledge for profiling + lang detection ────
+const SCENE_KNOWLEDGE = new Map([
+    ['arijit singh',     { lang: 'Hindi', scene: 'Bollywood romantic' }],
+    ['atif aslam',       { lang: 'Hindi/Urdu', scene: 'Bollywood romantic' }],
+    ['shreya ghoshal',   { lang: 'Hindi', scene: 'Bollywood classical' }],
+    ['a.r. rahman',      { lang: 'Hindi/Tamil', scene: 'Bollywood orchestral' }],
+    ['pritam',           { lang: 'Hindi', scene: 'Bollywood pop' }],
+    ['neha kakkar',      { lang: 'Hindi', scene: 'Bollywood pop/dance' }],
+    ['badshah',          { lang: 'Hindi/Punjabi', scene: 'Desi hip hop' }],
+    ['diljit dosanjh',   { lang: 'Punjabi', scene: 'Punjabi pop' }],
+    ['ap dhillon',       { lang: 'Punjabi', scene: 'Punjabi pop/hip hop' }],
+    ['sidhu moose wala', { lang: 'Punjabi', scene: 'Punjabi hip hop' }],
+    ['anirudh',          { lang: 'Tamil', scene: 'Kollywood' }],
+    ['yuvan shankar raja', { lang: 'Tamil', scene: 'Kollywood rock' }],
+    ['bts',              { lang: 'Korean', scene: 'K-pop' }],
+    ['blackpink',        { lang: 'Korean', scene: 'K-pop' }],
+    ['stray kids',       { lang: 'Korean', scene: 'K-pop/hip hop' }],
+    ['ive',              { lang: 'Korean', scene: 'K-pop' }],
+    ['bad bunny',        { lang: 'Spanish', scene: 'Reggaeton/Latin trap' }],
+    ['ozuna',            { lang: 'Spanish', scene: 'Reggaeton' }],
+    ['rosalía',          { lang: 'Spanish', scene: 'Latin pop/flamenco' }],
+    ['burna boy',        { lang: 'English/Yoruba', scene: 'Afrobeats' }],
+    ['wizkid',           { lang: 'English/Yoruba', scene: 'Afrobeats' }],
+    ['taylor swift',     { lang: 'English', scene: 'Pop/indie folk' }],
+    ['the weeknd',       { lang: 'English', scene: 'Dark R&B/synth pop' }],
+    ['drake',            { lang: 'English', scene: 'Hip hop/R&B' }],
+    ['kendrick lamar',   { lang: 'English', scene: 'Conscious hip hop' }],
+    ['travis scott',     { lang: 'English', scene: 'Psychedelic trap' }],
+    ['billie eilish',    { lang: 'English', scene: 'Dark pop/alt' }],
+    ['olivia rodrigo',   { lang: 'English', scene: 'Pop punk/pop rock' }],
+    ['doja cat',         { lang: 'English', scene: 'Pop rap' }],
+]);
+
 /**
- * Build a structured listening profile from history.
- * This is the "seed" that drives all recommendations, like Spotify's taste profile.
+ * Build a rich listening profile (Spotify's "taste profile")
+ * Now includes mood features from moodEngine.
  */
 function buildListeningProfile(history, currentTrack) {
     const tracks = [];
@@ -52,10 +101,70 @@ function buildListeningProfile(history, currentTrack) {
         titles.push(`"${t.info.title}" by ${t.info.author}`);
     }
 
-    // Over-represented = heard 2+ songs from same artist
     const overRepresented = Object.entries(artistCounts)
         .filter(([, c]) => c >= 2)
         .map(([a]) => a);
+
+    // ── Detect language from ALL tracks in session ──
+    let detectedLanguage = null;
+    const langVotes = {};
+    for (const t of tracks) {
+        const text = `${t.info.title || ''} ${t.info.author || ''}`;
+        const authorLower = (t.info.author || '').toLowerCase();
+
+        for (const [artist, scene] of SCENE_KNOWLEDGE) {
+            if (authorLower.includes(artist)) {
+                langVotes[scene.lang] = (langVotes[scene.lang] || 0) + 3;
+                break;
+            }
+        }
+
+        const langPatterns = [
+            { lang: 'Hindi', re: /[\u0900-\u097F]|bollywood|hindi|desi\b/i },
+            { lang: 'Tamil', re: /[\u0B80-\u0BFF]|tamil|kollywood/i },
+            { lang: 'Telugu', re: /[\u0C00-\u0C7F]|telugu|tollywood/i },
+            { lang: 'Punjabi', re: /[\u0A00-\u0A7F]|punjabi/i },
+            { lang: 'Korean', re: /[\uAC00-\uD7AF]|k-?pop|korean/i },
+            { lang: 'Japanese', re: /[\u3040-\u30FF]|j-?pop|japanese|anime/i },
+            { lang: 'Spanish', re: /reggaet[oó]n|latin\b|spanish|bachata/i },
+            { lang: 'Arabic', re: /[\u0600-\u06FF]|arabic/i },
+            { lang: 'Portuguese', re: /portuguese|brasileiro|sertanejo/i },
+            { lang: 'French', re: /french|français/i },
+            { lang: 'Turkish', re: /turkish|türkçe/i },
+            { lang: 'Russian', re: /[\u0400-\u04FF]|russian/i },
+            { lang: 'Afrobeats', re: /afrobeats|afro\s*pop|amapiano/i },
+        ];
+        for (const { lang, re } of langPatterns) {
+            if (re.test(text)) {
+                langVotes[lang] = (langVotes[lang] || 0) + 1;
+                break;
+            }
+        }
+    }
+
+    if (Object.keys(langVotes).length > 0) {
+        detectedLanguage = Object.entries(langVotes)
+            .sort((a, b) => b[1] - a[1])[0][0];
+    }
+
+    // ── Detect scene from artist knowledge ──
+    let detectedScene = null;
+    for (const t of tracks) {
+        const authorLower = (t.info.author || '').toLowerCase();
+        for (const [artist, scene] of SCENE_KNOWLEDGE) {
+            if (authorLower.includes(artist)) {
+                detectedScene = scene.scene;
+                break;
+            }
+        }
+        if (detectedScene) break;
+    }
+
+    // ── NEW: Mood features from moodEngine ──
+    const seedMood = currentTrack?.info
+        ? detectTrackMood(currentTrack)
+        : null;
+    const sessionMood = getSessionMoodProfile(tracks);
 
     return {
         artists,
@@ -63,20 +172,22 @@ function buildListeningProfile(history, currentTrack) {
         overRepresented,
         titles,
         trackCount: tracks.length,
-        // Recent bias — Spotify weights the last few tracks more
         recentArtists: artists.slice(0, 3),
         recentTitles: titles.slice(0, 5),
+        detectedLanguage,
+        detectedScene,
+        seedMood,
+        sessionMood,
+        tracks, // pass raw tracks for mood summary builder
+        currentTrack: currentTrack?.info ? {
+            title: currentTrack.info.title,
+            author: currentTrack.info.author,
+        } : null,
     };
 }
 
 /**
- * Main recommendation function — Spotify-quality AI recommendations.
- *
- * Pipeline:
- * 1. Build listening profile from session
- * 2. If AI available → use AI with Spotify-grade prompt
- * 3. If AI unavailable/unclear → use local collaborative algorithm
- * 4. Always return "Artist - Song Title" format for multi-source resolution
+ * Main entry — get AI recommendations, fall back to local
  */
 export async function getSmartRecommendations(history, currentTrack, count = 8) {
     const profile = buildListeningProfile(history, currentTrack);
@@ -84,14 +195,12 @@ export async function getSmartRecommendations(history, currentTrack, count = 8) 
 
     const client = getClient();
 
-    // AI available → use Spotify-grade prompt
     if (client) {
         try {
             const aiResults = await getAIRecommendations(client, profile, count);
             if (aiResults.length >= Math.ceil(count / 2)) {
                 return aiResults;
             }
-            // AI returned too few — supplement with local algorithm
             const localResults = getLocalRecommendations(profile, count - aiResults.length);
             return [...aiResults, ...localResults].slice(0, count);
         } catch (err) {
@@ -99,81 +208,190 @@ export async function getSmartRecommendations(history, currentTrack, count = 8) 
         }
     }
 
-    // No AI → local collaborative algorithm
     return getLocalRecommendations(profile, count);
 }
 
 /**
- * AI-powered recommendations with Spotify-grade prompt engineering
+ * ═══════════════════════════════════════════════════════════════════
+ *  AI RECOMMENDATIONS — Full Spotify pipeline with mood awareness
+ *
+ *  The AI now receives:
+ *  - Mood features from our local NLP engine (energy, valence, etc.)
+ *  - Session mood profile (average across all played tracks)
+ *  - Allowed mood transitions (prevents jarring jumps)
+ *  - Detailed scoring formula it should follow
+ *
+ *  The AI performs the full Spotify pipeline internally:
+ *  1. Analyze seed track DNA (with our provided features as hints)
+ *  2. Map artist graph neighborhood
+ *  3. Generate candidates matching mood + energy + language
+ *  4. Score using the weighted similarity formula
+ *  5. Sequence for natural flow with mood transition smoothing
+ * ═══════════════════════════════════════════════════════════════════
  */
 async function getAIRecommendations(client, profile, count) {
     const playedTitles = profile.titles.slice(-20);
 
-    const prompt = `You are Spotify's recommendation algorithm. Analyze this listening session and generate a perfect radio queue that flows seamlessly, as if the user pressed "Song Radio" on Spotify.
+    // ── Seed track info ──
+    const seedInfo = profile.currentTrack
+        ? `SEED TRACK: "${profile.currentTrack.title}" by ${profile.currentTrack.author}`
+        : 'SEED: Unknown';
 
-## Current listening session (most recent first):
+    // ── LOCAL MOOD ANALYSIS (from our NLP engine) ──
+    // This gives the AI precise audio feature context it wouldn't have otherwise
+    let moodBlock = '';
+    if (profile.seedMood) {
+        const m = profile.seedMood;
+        moodBlock = `
+OUR AUDIO ANALYSIS OF SEED TRACK:
+  mood: ${m.mood}
+  energy: ${m.energy} (0=calm, 1=intense)
+  valence: ${m.valence} (0=sad, 1=happy)
+  danceability: ${m.danceability}
+  tempo: ${m.tempo}
+  context: ${m.context}`;
+    }
+
+    // ── SESSION MOOD PROFILE ──
+    let sessionBlock = '';
+    if (profile.sessionMood) {
+        const s = profile.sessionMood;
+        sessionBlock = `
+SESSION MOOD PROFILE (averaged across ${profile.trackCount} tracks):
+  dominant_mood: ${s.mood}
+  avg_energy: ${s.energy}
+  avg_valence: ${s.valence}
+  mood_distribution: ${JSON.stringify(s.moodDistribution)}`;
+    }
+
+    // ── MOOD TRANSITION CONSTRAINTS ──
+    let transitionBlock = '';
+    if (profile.seedMood) {
+        const allowed = getAllowedNextMoods(profile.seedMood.mood);
+        transitionBlock = `
+MOOD TRANSITION RULES (Spotify's mood smoothing):
+  Current mood: ${profile.seedMood.mood}
+  Allowed next moods: [${allowed.join(', ')}]
+  ⚠️ Do NOT recommend songs with moods outside this list. This prevents jarring transitions like sad→party.`;
+    }
+
+    // ── Language enforcement ──
+    const langBlock = profile.detectedLanguage
+        ? `\nDETECTED LANGUAGE: ${profile.detectedLanguage}\n⚠️ CRITICAL: ALL recommendations MUST be in ${profile.detectedLanguage}. The listener is in a ${profile.detectedLanguage}-language session. Do NOT switch to English unless the session is in English. This is the #1 priority.`
+        : '';
+
+    const sceneBlock = profile.detectedScene
+        ? `\nDETECTED SCENE: ${profile.detectedScene}`
+        : '';
+
+    const cooldownBlock = profile.overRepresented.length > 0
+        ? `\nARTIST COOLDOWN: Do NOT recommend songs by: ${profile.overRepresented.join(', ')} (overplayed in session)`
+        : '';
+
+    const systemPrompt = `You are a Spotify-grade music recommendation engine. You replicate Spotify's Song Radio algorithm to generate a perfect autoplay queue.
+
+You will be given the currently playing song PLUS our local audio analysis of that song (mood, energy, valence, tempo). Use this data as ground truth for your recommendations.
+
+YOUR PIPELINE (follow exactly):
+
+STEP 1 — SEED DNA ANALYSIS:
+Use the provided audio features as a baseline. Refine with your music knowledge:
+- Genre & subgenre (be VERY specific: "Punjabi hip hop" not "pop")
+- Verify mood matches the audio features we detected
+- Note language and regional scene (NON-NEGOTIABLE: Hindi stays Hindi, Korean stays Korean)
+
+STEP 2 — CANDIDATE SCORING:
+For each candidate song, mentally compute:
+  score = 0.40 × mood_similarity
+        + 0.25 × energy_similarity
+        + 0.20 × genre_similarity
+        + 0.10 × tempo_similarity
+        + 0.05 × popularity_weight
+
+Only recommend songs with score > 0.6
+
+STEP 3 — MOOD TRANSITION SMOOTHING:
+- Check that each recommended song's mood is in the ALLOWED list
+- Energy should stay within ±0.2 of the seed track
+- Flow: sad→chill→hopeful is OK. sad→party EDM is NOT OK.
+- Maintain emotional thread for 3-4 songs before any gentle shift
+
+STEP 4 — DIVERSITY & SEQUENCING:
+- Mix: 40% safe picks (fans always like), 35% discovery, 25% deep cuts
+- Never 2 songs by the same artist in a row
+- Order for smooth energy transitions
+
+OUTPUT RULES:
+- Every song must be REAL and findable on YouTube AND Spotify
+- Format: ["Artist - Song Title", ...]
+- Return ONLY the JSON array, nothing else`;
+
+    const userPrompt = `${seedInfo}
+${moodBlock}${sessionBlock}${transitionBlock}${langBlock}${sceneBlock}${cooldownBlock}
+
+LISTENING SESSION (most recent first):
 ${playedTitles.join('\n')}
 
-## Your analysis process (do silently):
-1. Identify the EXACT subgenre (e.g. "midwest emo" not "rock", "dark trap" not "rap", "bedroom pop" not "pop", "progressive house" not "EDM")
-2. Determine the MOOD (melancholic, euphoric, chill, hype, dreamy, dark, uplifting, nostalgic...)
-3. Gauge the ENERGY level (1-10) and whether it's trending up, down, or steady
-4. Note the ERA preference (2020s, 2010s, 2000s, classic, mixed)
-
-## Generate exactly ${count} song recommendations:
-- RULE #1: Same specific subgenre — this is NON-NEGOTIABLE
-- RULE #2: Match the mood and energy precisely (±1 on energy scale)
-- RULE #3: Natural flow — each song should feel like "of course that plays next"
-- RULE #4: All songs must be REAL, by REAL artists, available on YouTube/Spotify/SoundCloud
-- MIX: ~60% songs by similar well-known artists in the same scene, ~30% adjacent artists the listener would discover and love, ~10% deeper cuts that perfectly fit the vibe
-${profile.overRepresented.length > 0 ? `- COOLDOWN: Do NOT recommend songs by ${profile.overRepresented.join(', ')} (listener has heard enough)` : ''}
-- NEVER include any song already in the session above
-- Prefer songs with high streaming counts (easier to find on all platforms)
-
-## OUTPUT (strict JSON, nothing else):
-["Artist - Song Title", "Artist - Song Title", ...]`;
+Generate exactly ${count} recommendations. Output ONLY a JSON array:`;
 
     const response = await client.chat.completions.create({
         model: config.aiModel,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 600,
-        temperature: 0.45,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+        ],
+        max_tokens: 800,
+        temperature: 0.55,
     });
 
     const text = response.choices[0]?.message?.content?.trim();
     if (!text) return [];
 
-    const jsonStr = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(jsonStr);
+    // Parse — handle markdown fences, stray text before/after JSON
+    let jsonStr = text;
+    jsonStr = jsonStr.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+        jsonStr = arrayMatch[0];
+    }
+
+    let parsed;
+    try {
+        parsed = JSON.parse(jsonStr);
+    } catch {
+        logger.debug(`AI returned unparseable response: ${text.substring(0, 200)}`);
+        return [];
+    }
 
     if (!Array.isArray(parsed)) return [];
 
-    // Filter: valid strings, not already played
+    // Filter and validate
     const playedLower = new Set(playedTitles.map(t => t.toLowerCase()));
     const cleaned = parsed
         .filter(s => typeof s === 'string' && s.length > 3 && s.length < 200)
+        .filter(s => s.includes('-') || s.includes('–') || s.includes('—'))
         .filter(s => {
             const lower = s.toLowerCase();
             const songPart = lower.split(/\s*[-–—]\s*/).slice(1).join(' ').trim();
             return !playedLower.has(lower) &&
-                   !playedTitles.some(p => songPart && p.toLowerCase().includes(songPart));
+                   !playedTitles.some(p => songPart && songPart.length > 3 && p.toLowerCase().includes(songPart));
         })
         .slice(0, count);
 
     if (cleaned.length > 0) {
-        logger.info(`AI recommends ${cleaned.length}: ${cleaned.slice(0, 3).join(', ')}...`);
+        logger.info(`AI recommends ${cleaned.length}: ${cleaned.slice(0, 3).join(', ')}${cleaned.length > 3 ? '...' : ''}`);
     }
     return cleaned;
 }
 
 /**
- * ═══════════════════════════════════════════════════════════════
- *  LOCAL COLLABORATIVE ALGORITHM (No AI needed)
+ * ═══════════════════════════════════════════════════════════════════
+ *  LOCAL ALGORITHM (no AI) — Mood-aware search queries
  *
- *  Generates high-quality search queries using collaborative
- *  filtering patterns, artist similarity, and session analysis.
- *  This runs when AI is unavailable or returns too few results.
- * ═══════════════════════════════════════════════════════════════
+ *  Uses moodEngine data to build targeted queries.
+ *  Queries are structured to trigger platform recommendation
+ *  engines (YouTube "related", Spotify "radio") using mood context.
+ * ═══════════════════════════════════════════════════════════════════
  */
 function getLocalRecommendations(profile, count) {
     if (!profile || profile.artists.length === 0) return [];
@@ -181,43 +399,67 @@ function getLocalRecommendations(profile, count) {
     const queries = [];
     const used = new Set();
 
-    function addQuery(q) {
+    function add(q) {
         const key = q.toLowerCase();
-        if (!used.has(key)) {
+        if (key.length > 3 && !used.has(key)) {
             used.add(key);
             queries.push(q);
         }
     }
 
-    // ── Collaborative: "fans also like" patterns ──
+    // ── Seed-based queries ──
+    if (profile.currentTrack) {
+        const { title, author } = profile.currentTrack;
+        add(`${author} - ${title}`);
+        add(`${author} songs`);
+        add(`${author} top tracks`);
+    }
+
+    // ── Mood-based queries (NEW — uses moodEngine) ──
+    if (profile.seedMood) {
+        const mood = profile.seedMood.mood;
+        const context = profile.seedMood.context;
+        if (profile.detectedLanguage) {
+            add(`${mood} ${profile.detectedLanguage} songs`);
+            add(`${profile.detectedLanguage} ${context} music`);
+        } else {
+            add(`${mood} songs`);
+            add(`${context} music playlist`);
+        }
+    }
+
+    // ── Language-scoped discovery ──
+    if (profile.detectedLanguage) {
+        const lang = profile.detectedLanguage;
+        for (const artist of profile.recentArtists.slice(0, 2)) {
+            add(`${artist} ${lang} songs`);
+        }
+        add(`${lang} songs`);
+        add(`new ${lang} music`);
+        add(`trending ${lang}`);
+    }
+
+    // ── Scene-based ──
+    if (profile.detectedScene) {
+        add(`${profile.detectedScene} songs`);
+        add(`${profile.detectedScene} music`);
+    }
+
+    // ── Artist similarity ──
     for (const artist of profile.recentArtists.slice(0, 3)) {
-        addQuery(`${artist} top tracks`);
-        addQuery(`${artist} best songs`);
+        add(`${artist} radio`);
     }
 
-    // ── Content-based: "similar to current song" ──
-    for (const title of profile.recentTitles.slice(0, 2)) {
-        const clean = title.replace(/"/g, '').replace(/\s+by\s+.+$/, '');
-        addQuery(`songs like ${clean}`);
+    // ── "Similar to" queries ──
+    if (profile.currentTrack) {
+        const clean = profile.currentTrack.title.replace(/\(.*?\)|\[.*?\]/g, '').trim();
+        add(`songs like ${clean}`);
     }
 
-    // ── Artist similarity chains ──
-    for (const artist of profile.artists.slice(0, 4)) {
-        addQuery(`${artist} radio`);
-    }
-
-    // ── Discovery: adjacent artists ──
-    if (profile.artists[0]) {
-        addQuery(`artists similar to ${profile.artists[0]}`);
-        addQuery(`if you like ${profile.artists[0]} playlist`);
-    }
-
-    // Shuffle for variety
-    const shuffled = queries.sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, count);
+    return queries.sort(() => Math.random() - 0.5).slice(0, count);
 }
 
-// ── Legacy exports for backward compatibility ──────────────────
+// ── Legacy exports ─────────────────────────────────────────────
 export async function getRecommendations(history, currentTrack) {
     const results = await getSmartRecommendations(history, currentTrack, 1);
     return results[0] || null;

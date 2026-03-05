@@ -478,6 +478,9 @@ async function ensureEnvFile(autoMongoUri = '') {
     let aiKey = process.env.AI_API_KEY || getEnvValue(existingContent, 'AI_API_KEY') || '';
     let spotifyId = process.env.SPOTIFY_CLIENT_ID || getEnvValue(existingContent, 'SPOTIFY_CLIENT_ID') || '';
     let spotifySecret = process.env.SPOTIFY_CLIENT_SECRET || getEnvValue(existingContent, 'SPOTIFY_CLIENT_SECRET') || '';
+    let ytOauthToken = process.env.YOUTUBE_OAUTH_REFRESH_TOKEN || getEnvValue(existingContent, 'YOUTUBE_OAUTH_REFRESH_TOKEN') || '';
+    let ytPoToken = process.env.YOUTUBE_PO_TOKEN || getEnvValue(existingContent, 'YOUTUBE_PO_TOKEN') || '';
+    let ytVisitorData = process.env.YOUTUBE_VISITOR_DATA || getEnvValue(existingContent, 'YOUTUBE_VISITOR_DATA') || '';
 
     const shouldPromptOptional = !AUTO_MODE && (RECONFIGURE || !hasEnv);
     if (shouldPromptOptional) {
@@ -536,6 +539,15 @@ APPLE_MUSIC_TOKEN=
 
 # ─── Deezer ─────────────────────────────────────────────────
 DEEZER_DECRYPTION_KEY=
+
+# ─── YouTube Authentication (VPS) ───────────────────────────
+# OAuth is enabled by default. On first Lavalink start, check the
+# logs for a device-code URL to authenticate. Once done, paste
+# the refresh token below so it persists across restarts:
+YOUTUBE_OAUTH_REFRESH_TOKEN=${ytOauthToken}
+# Alternative: PoToken + VisitorData (if OAuth doesn't work)
+YOUTUBE_PO_TOKEN=${ytPoToken}
+YOUTUBE_VISITOR_DATA=${ytVisitorData}
 
 # ─── AI / OpenAI ────────────────────────────────────────────
 AI_API_KEY=${aiKey}
@@ -631,6 +643,17 @@ async function main() {
     ok(`MongoDB: ${NO_MONGO ? 'auto-start disabled by flag' : 'auto-start checked'}`);
     ok(`Lavalink: ${lavalinkStatus.ok ? (lavalinkStatus.prestarted ? 'running' : 'external') : 'failed (yt-dlp fallback)'}`);
     ok(`Commands: ${commandsSynced ? 'synced' : 'will sync on bot start'}`);
+
+    // YouTube auth guidance for VPS
+    const hasYtAuth = process.env.YOUTUBE_OAUTH_REFRESH_TOKEN || process.env.YOUTUBE_PO_TOKEN;
+    if (!hasYtAuth) {
+        console.log('');
+        warn(`${C.bold}YouTube VPS Setup Required:${C.reset}`);
+        log('  OAuth is enabled. On first start, Lavalink will print a');
+        log('  device-code URL in the logs. Visit it to authenticate with');
+        log('  a Google account. Then save the refresh token to .env as');
+        log(`  ${C.cyan}YOUTUBE_OAUTH_REFRESH_TOKEN=<token>${C.reset}`);
+    }
     console.log('');
 
     // 10. Launch bot

@@ -4,9 +4,10 @@ import { lavalinkNodes } from '../config/lavalink.js';
 import { config } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { GuildQueue } from './queueManager.js';
-import { resolveTrack, resolvePlaylist } from './sourceResolver.js';
-import { createPlayerEmbed, createControlButtons } from '../ui/playerEmbed.js';
+import { resolveTrack } from './sourceResolver.js';
+import { createPlayerEmbed, createControlButtons, createExtraButtons } from '../ui/playerEmbed.js';
 import { getAutoplayTrack, clearAutoplayBuffer } from './autoplayEngine.js';
+import { detectTrackMood } from '../ai/moodEngine.js';
 
 export class PlayerManager {
     constructor(client) {
@@ -270,6 +271,11 @@ export class PlayerManager {
             queue.currentPosition = 0;
             queue.paused = false;
 
+            // Detect mood of current track (used by autoplay for transition smoothing)
+            try {
+                queue.currentMood = detectTrackMood(trackData);
+            } catch { queue.currentMood = null; }
+
             // Update the player embed
             await this._updatePlayerEmbed(queue);
             this._startUpdateInterval(queue);
@@ -383,19 +389,20 @@ export class PlayerManager {
 
         try {
             const embed = createPlayerEmbed(queue, idle);
-            const buttons = createControlButtons(queue);
+            const row1 = createControlButtons(queue);
+            const row2 = createExtraButtons(queue);
 
             if (queue.playerMessageId) {
                 try {
                     const msg = await queue.textChannel.messages.fetch(queue.playerMessageId);
-                    await msg.edit({ embeds: [embed], components: [buttons] });
+                    await msg.edit({ embeds: [embed], components: [row1, row2] });
                     return;
                 } catch {
                     // Message deleted or not found — create new one
                 }
             }
 
-            const msg = await queue.textChannel.send({ embeds: [embed], components: [buttons] });
+            const msg = await queue.textChannel.send({ embeds: [embed], components: [row1, row2] });
             queue.playerMessageId = msg.id;
         } catch (err) {
             logger.debug(`Embed update failed: ${err.message}`);
@@ -441,6 +448,11 @@ export class PlayerManager {
                 await this._playNext(guildId, player);
                 break;
             }
+            case 'music_stop': {
+                await this.stop(guildId);
+                await this._updatePlayerEmbed(queue, true);
+                break;
+            }
             case 'music_loop': {
                 const modes = ['off', 'track', 'queue'];
                 const idx = modes.indexOf(queue.loopMode);
@@ -452,6 +464,30 @@ export class PlayerManager {
             case 'music_shuffle': {
                 queue.shuffle();
                 await this._updatePlayerEmbed(queue);
+                break;
+            }
+            case 'music_autoplay': {
+                queue.autoplay = !queue.autoplay;
+                queue.saveSettings();
+                await this._updatePlayerEmbed(queue);
+                break;
+            }
+            case 'music_voldown': {
+                const newVol = Math.max(0, queue.volume - 10);
+                await this.setVolume(guildId, newVol);
+                await this._updatePlayerEmbed(queue);
+                break;
+            }
+            case 'music_volup': {
+                const newVol = Math.min(100, queue.volume + 10);
+                await this.setVolume(guildId, newVol);
+                await this._updatePlayerEmbed(queue);
+                break;
+            }
+            case 'music_queue': {
+                const { createQueueEmbed } = await import('../ui/playerEmbed.js');
+                const queueEmbed = createQueueEmbed(queue);
+                await interaction.followUp({ embeds: [queueEmbed], flags: MessageFlags.Ephemeral }).catch(() => {});
                 break;
             }
         }
@@ -523,10 +559,11 @@ export class PlayerManager {
             if (queue.textChannel) {
                 try {
                     const embed = createPlayerEmbed(queue, true);
-                    const buttons = createControlButtons(queue);
+                    const row1 = createControlButtons(queue);
+                    const row2 = createExtraButtons(queue);
                     if (queue.playerMessageId) {
                         const msg = await queue.textChannel.messages.fetch(queue.playerMessageId).catch(() => null);
-                        if (msg) await msg.edit({ embeds: [embed], components: [buttons] }).catch(() => {});
+                        if (msg) await msg.edit({ embeds: [embed], components: [row1, row2] }).catch(() => {});
                     }
                 } catch {}
             }

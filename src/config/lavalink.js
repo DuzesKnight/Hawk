@@ -99,6 +99,45 @@ function buildDeezerBlock() {
       masterDecryptionKey: ""`;
 }
 
+function buildYouTubeBlock() {
+    let oauthBlock = '';
+    let potBlock = '';
+
+    if (config.youtube.oauthRefreshToken) {
+        // User provided a refresh token — use it directly
+        oauthBlock = `
+    oauth:
+      enabled: true
+      refreshToken: "${escapeYaml(config.youtube.oauthRefreshToken)}"`;
+    } else {
+        // Enable OAuth without a token — Lavalink will print a device-code
+        // link in the logs on first start. User authenticates once and it works.
+        oauthBlock = `
+    oauth:
+      enabled: true`;
+    }
+
+    if (config.youtube.poToken && config.youtube.visitorData) {
+        potBlock = `
+    pot:
+      token: "${escapeYaml(config.youtube.poToken)}"
+      visitorData: "${escapeYaml(config.youtube.visitorData)}"`;
+    }
+
+    return `
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    clients:
+      - MUSIC
+      - ANDROID_MUSIC
+      - TVHTML5EMBEDDED
+      - WEB
+      - ANDROID_TESTSUITE${oauthBlock}${potBlock}`;
+}
+
 export const lavalinkConfig = `
 server:
   port: ${config.lavalink.local.port}
@@ -141,29 +180,7 @@ lavalink:
       repository: "https://maven.lavalink.dev/releases"
 
 plugins:
-  youtube:
-    enabled: true
-    allowSearch: true
-    allowDirectVideoIds: true
-    allowDirectPlaylistIds: true
-    clients:
-      - TVHTML5EMBEDDED
-      - ANDROID_TESTSUITE
-      - WEB_EMBEDDED
-      - MUSIC
-      - ANDROID_MUSIC
-    # ──── VPS Authentication (uncomment ONE method) ────
-    # Method 1: OAuth (recommended for VPS) — run Lavalink once,
-    # follow the device-code link in logs, then paste refresh token:
-    # oauth:
-    #   enabled: true
-    #   refreshToken: "YOUR_REFRESH_TOKEN"
-    #
-    # Method 2: PoToken + VisitorData (alternative for VPS)
-    # Generate at: https://github.com/iv-org/youtube-trusted-session-generator
-    # pot:
-    #   token: "YOUR_PO_TOKEN"
-    #   visitorData: "YOUR_VISITOR_DATA"
+${buildYouTubeBlock()}
 
   lavasrc:
     providers:

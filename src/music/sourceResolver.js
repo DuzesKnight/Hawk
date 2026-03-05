@@ -41,10 +41,14 @@ function classifyQuery(query) {
 function normalizeSearchQuery(query) {
     let q = query.trim();
     // Remove common noise that hurts search accuracy
-    q = q.replace(/\b(official\s*(music\s*)?video|official\s*audio|lyric\s*video|lyrics?\s*video|audio\s*only|full\s*video|hd|hq|4k|1080p|720p|360p|mv)\b/gi, '');
+    q = q.replace(/\b(official\s*(music\s*)?video|official\s*audio|lyric\s*video|lyrics?\s*video|audio\s*only|full\s*video|hd|hq|4k|1080p|720p|360p|mv|visuali[sz]er|animated\s*video)\b/gi, '');
     // Remove noise in parentheses/brackets
-    q = q.replace(/\((?:official|audio|video|hd|hq|lyrics?|visuali[sz]er|animated|explicit)\)/gi, '');
-    q = q.replace(/\[(?:official|audio|video|hd|hq|lyrics?|visuali[sz]er|animated|explicit)\]/gi, '');
+    q = q.replace(/\((?:official|audio|video|hd|hq|lyrics?|visuali[sz]er|animated|explicit|clean|dirty|remastered|music\s*video|feat\.?.*?)\)/gi, '');
+    q = q.replace(/\[(?:official|audio|video|hd|hq|lyrics?|visuali[sz]er|animated|explicit|clean|dirty|remastered|music\s*video|feat\.?.*?)\]/gi, '');
+    // Remove trailing " - Topic" from artist names in queries
+    q = q.replace(/\s*-\s*Topic\b/gi, '');
+    // Remove VEVO suffix
+    q = q.replace(/VEVO\b/gi, '');
     // Collapse whitespace
     q = q.replace(/\s+/g, ' ').trim();
     return q || query.trim();
@@ -64,6 +68,10 @@ function pickBestSearchResult(tracks, query) {
     const parts = queryLower.split(/\s*[-–—]\s*/);
     const queryArtist = parts.length > 1 ? parts[0].trim() : '';
     const queryTitle = parts.length > 1 ? parts.slice(1).join(' ').trim() : queryLower;
+    // Also try "title by artist" pattern
+    const byParts = queryLower.split(/\s+by\s+/i);
+    const queryTitleAlt = byParts.length > 1 ? byParts[0].trim() : '';
+    const queryArtistAlt = byParts.length > 1 ? byParts[1].trim() : '';
     const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
 
     let bestScore = -999;
@@ -74,16 +82,42 @@ function pickBestSearchResult(tracks, query) {
         const title = (track.info?.title || '').toLowerCase();
         const author = (track.info?.author || '').toLowerCase();
         const length = track.info?.length || 0;
+        // Clean title for comparison (strip parenthetical noise)
+        const titleClean = title
+            .replace(/\((?:official|audio|video|lyrics?|visuali[sz]er|music\s*video|feat\.?[^)]*)\)/gi, '')
+            .replace(/\[(?:official|audio|video|lyrics?|visuali[sz]er|music\s*video|feat\.?[^)]*)\]/gi, '')
+            .replace(/\s+/g, ' ').trim();
+
+        // ── EXACT MATCH (highest priority — this IS the requested song) ──
+        if (queryTitle && queryArtist) {
+            // Both artist and title match = near-perfect match
+            if ((titleClean.includes(queryTitle) || title.includes(queryTitle)) &&
+                (author.includes(queryArtist) || title.includes(queryArtist))) {
+                score += 25;
+            }
+        } else if (queryTitleAlt && queryArtistAlt) {
+            if ((titleClean.includes(queryTitleAlt) || title.includes(queryTitleAlt)) &&
+                (author.includes(queryArtistAlt) || title.includes(queryArtistAlt))) {
+                score += 25;
+            }
+        }
 
         // ── Title matching ──
-        if (title.includes(queryTitle) && queryTitle.length > 3) score += 15;
-        else if (queryWords.length > 0 && queryWords.every(w => title.includes(w))) score += 10;
-        else if (queryWords.length > 0 && queryWords.filter(w => title.includes(w)).length >= queryWords.length * 0.7) score += 6;
+        if (queryTitle && queryTitle.length > 3 && (titleClean.includes(queryTitle) || title.includes(queryTitle))) {
+            score += 15;
+        } else if (queryTitleAlt && queryTitleAlt.length > 3 && (titleClean.includes(queryTitleAlt) || title.includes(queryTitleAlt))) {
+            score += 15;
+        } else if (queryWords.length > 0 && queryWords.every(w => title.includes(w) || author.includes(w))) {
+            score += 10;
+        } else if (queryWords.length > 0 && queryWords.filter(w => title.includes(w) || author.includes(w)).length >= queryWords.length * 0.7) {
+            score += 6;
+        }
 
         // ── Artist matching ──
-        if (queryArtist) {
-            if (author.includes(queryArtist)) score += 12;
-            if (title.includes(queryArtist)) score += 5;
+        const effectiveArtist = queryArtist || queryArtistAlt;
+        if (effectiveArtist) {
+            if (author.includes(effectiveArtist)) score += 12;
+            else if (title.includes(effectiveArtist)) score += 5;
         }
 
         // ── Duration (ideal song length: 1.5-7 minutes) ──
@@ -91,21 +125,33 @@ function pickBestSearchResult(tracks, query) {
         if (length < 30000) score -= 10;   // clip/preview
         if (length > 600000) score -= 5;   // mix/compilation
 
-        // ── Anti-garbage ──
-        if (!queryLower.includes('remix') && title.includes('remix')) score -= 5;
-        if (!queryLower.includes('cover') && title.includes('cover')) score -= 5;
-        if (!queryLower.includes('live') && /\blive\b/.test(title)) score -= 3;
-        if (title.includes('karaoke')) score -= 12;
-        if (title.includes('instrumental') && !queryLower.includes('instrumental')) score -= 7;
-        if (title.includes('8d audio') || title.includes('slowed')) score -= 9;
-        if (title.includes('nightcore') && !queryLower.includes('nightcore')) score -= 7;
-        if (title.includes('bass boosted')) score -= 7;
-        if (title.includes('sped up') && !queryLower.includes('sped up')) score -= 6;
+        // ── Anti-garbage (aggressive — keeps the ORIGINAL version) ──
+        if (!queryLower.includes('remix') && title.includes('remix')) score -= 8;
+        if (!queryLower.includes('cover') && title.includes('cover')) score -= 8;
+        if (!queryLower.includes('live') && /\blive\b/.test(title)) score -= 4;
+        if (title.includes('karaoke')) score -= 15;
+        if (title.includes('instrumental') && !queryLower.includes('instrumental')) score -= 10;
+        if (title.includes('8d audio') || title.includes('slowed')) score -= 12;
+        if (title.includes('nightcore') && !queryLower.includes('nightcore')) score -= 10;
+        if (title.includes('bass boosted')) score -= 10;
+        if (title.includes('sped up') && !queryLower.includes('sped up')) score -= 8;
+        if (title.includes('reverb') && !queryLower.includes('reverb')) score -= 6;
+        if (title.includes('lofi') && !queryLower.includes('lofi')) score -= 5;
+        if (title.includes('mashup') && !queryLower.includes('mashup')) score -= 6;
+        if (title.includes('tutorial') || title.includes('reaction')) score -= 15;
+        if (title.includes('parody')) score -= 12;
 
-        // ── Quality / official signals ──
-        if (author.includes('- topic') || author.includes('vevo')) score += 3;
+        // ── Quality / official signals (prefer original uploads) ──
+        if (author.includes('- topic')) score += 5;   // YouTube Music auto-generated = high quality original
+        if (author.includes('vevo')) score += 4;
         if (author.includes('official')) score += 2;
-        if (title.includes('official audio') || title.includes('official music video')) score += 2;
+        if (title.includes('official audio')) score += 3;
+        if (title.includes('official music video')) score += 2;
+
+        // ── Position bonus (YouTube ranks best results first) ──
+        const index = tracks.indexOf(track);
+        if (index === 0) score += 2;
+        else if (index === 1) score += 1;
 
         if (score > bestScore) {
             bestScore = score;
@@ -248,7 +294,11 @@ export async function resolveTrack(shoukaku, query) {
         if (queryType === 'search') {
             // ── Text search: try multiple sources with smart ordering ──
             const cleanQuery = normalizeSearchQuery(query);
-            const searchSources = ['ytsearch:', 'scsearch:'];
+            // Request 10 results from YouTube for better scoring accuracy
+            const searchSources = ['ytsearch10:'];
+
+            // SoundCloud as secondary
+            searchSources.push('scsearch:');
 
             // Only add Spotify search if credentials are configured
             if (config.spotify.clientId && config.spotify.clientSecret) {
@@ -284,7 +334,7 @@ export async function resolveTrack(shoukaku, query) {
                     logger.warn('Spotify URL failed — SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set in .env');
                 }
                 // Try to extract a title from the Spotify URL slug for YouTube search
-                const slug = query.match(/\\/(?:track|album|playlist)\\/[a-zA-Z0-9]+(?:\\?.*)?$/)?.[0];
+                const slug = query.match(/\/(?:track|album|playlist)\/[a-zA-Z0-9]+(?:\?.*)?$/)?.[0];
                 if (!slug) {
                     // Can't extract anything useful — fall through to ytdlp
                 }
@@ -420,15 +470,20 @@ async function ytdlpFallback(query) {
 
     return new Promise((resolve) => {
         let args;
+        // VPS-friendly base args: bypass geo-restrictions & use reliable clients
+        const baseArgs = [
+            '--no-check-certificates',
+            '--geo-bypass',
+            '--extractor-args', 'youtube:player_client=android_music,web',
+        ];
+
         if (isPlaylist && isURL(query)) {
-            // For playlists: dump the whole playlist as JSON (one entry per line)
-            args = ['--flat-playlist', '-j', query];
+            args = [...baseArgs, '--flat-playlist', '-j', query];
         } else if (isURL(query)) {
-            args = ['-j', '--no-playlist', query];
+            args = [...baseArgs, '-j', '--no-playlist', query];
         } else {
-            // Text search
             const cleanQuery = normalizeSearchQuery(query);
-            args = ['-j', '--no-playlist', `ytsearch5:${cleanQuery}`];
+            args = [...baseArgs, '-j', '--no-playlist', `ytsearch5:${cleanQuery}`];
         }
 
         execFile(exe, args, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {

@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, MessageFlags, ChannelType, PermissionFlagsBits, EmbedBuilder } from 'discord.js';
 import { Guild } from '../../database/schemas/Guild.js';
-import { createPlayerEmbed, createControlButtons } from '../../ui/playerEmbed.js';
+import { createPlayerEmbed, createControlButtons, createExtraButtons } from '../../ui/playerEmbed.js';
 import { invalidateChannelCache } from '../../events/messageCreate.js';
 import { logger } from '../../utils/logger.js';
 import mongoose from 'mongoose';
@@ -32,7 +32,7 @@ export async function execute(interaction, client) {
         const channel = await interaction.guild.channels.create({
             name: '🎵│music-requests',
             type: ChannelType.GuildText,
-            topic: '🎵 Send a song name or URL here to play music! Messages auto-delete.',
+            topic: '� Drop a song name, paste a URL, or use the buttons below to control music. Messages auto-delete.',
             permissionOverwrites: [
                 {
                     id: interaction.guild.id,
@@ -50,32 +50,38 @@ export async function execute(interaction, client) {
             ],
         });
 
-        // Create initial player embed
+        // Create initial player embed with both button rows
         const queue = client.playerManager.getQueue(interaction.guildId);
         queue.textChannel = channel;
         const embed = createPlayerEmbed(queue, true);
-        const buttons = createControlButtons(queue);
-        const playerMsg = await channel.send({ embeds: [embed], components: [buttons] });
+        const row1 = createControlButtons(queue);
+        const row2 = createExtraButtons(queue);
+        const playerMsg = await channel.send({ embeds: [embed], components: [row1, row2] });
         queue.playerMessageId = playerMsg.id;
 
-        // Send instructions
+        // Send instructions embed — rich and informative
         const instructionEmbed = new EmbedBuilder()
-            .setColor(0x5865F2)
-            .setTitle('🎵 Music Request Channel')
+            .setColor(0x1DB954)
+            .setAuthor({ name: '🎧 HAWK Music Player' })
             .setDescription([
-                'Welcome to the music request channel!',
+                '### Welcome to your music command center!',
                 '',
-                '**How to use:**',
-                '• Type a song name or paste a URL',
-                '• Your message will auto-delete',
-                '• The player embed above will update',
+                '**How to play music:**',
+                '> 🎵 Type a **song name** — e.g. `Blinding Lights`',
+                '> 🔗 Paste a **URL** — YouTube, Spotify, SoundCloud, Apple Music',
+                '> 📋 Paste a **playlist URL** to queue the whole thing',
                 '',
-                '**Supported sources:**',
-                'YouTube, Spotify, Apple Music, SoundCloud, Bandcamp, and more!',
+                '**Controls (buttons above):**',
+                '> ⏮ Previous  •  ⏸/▶️ Pause/Play  •  ⏭ Skip  •  ⏹ Stop',
+                '> 🔁 Loop  •  🤖 Autoplay  •  🔉🔊 Volume  •  📋 Queue',
                 '',
-                '**Slash commands also work:**',
-                '`/play`, `/skip`, `/pause`, `/resume`, `/queue`, `/volume`, `/loop`, `/shuffle`, `/autoplay`',
-            ].join('\n'));
+                '**Slash commands:**',
+                '> `/play` `/skip` `/pause` `/resume` `/queue` `/volume`',
+                '> `/loop` `/shuffle` `/autoplay` `/lyrics` `/nowplaying`',
+                '',
+                '*Your messages auto-delete to keep this channel clean.*',
+            ].join('\n'))
+            .setFooter({ text: 'Powered by HAWK • YouTube • Spotify • SoundCloud • Apple Music' });
         await channel.send({ embeds: [instructionEmbed] });
 
         // Save to database

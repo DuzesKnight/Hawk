@@ -15,7 +15,7 @@ lavalink:
       local: false
     bufferDurationMs: 400
     frameBufferDurationMs: 5000
-    youtubePlaylistLoadLimit: 6
+    youtubePlaylistLoadLimit: 100
     playerUpdateInterval: 5
     youtubeSearchEnabled: true
     soundcloudSearchEnabled: true
@@ -46,23 +46,42 @@ plugins:
     allowDirectPlaylistIds: true
     clients:
       - MUSIC
+      - ANDROID_MUSIC
       - TVHTML5EMBEDDED
-      - IOS
       - WEB
+      - ANDROID_TESTSUITE
+    # ──── VPS Authentication ────
+    # OAuth is enabled by default. On first Lavalink start, check the
+    # logs for a device-code URL, visit it to authenticate with Google,
+    # and YouTube will work permanently. Optionally paste the refresh
+    # token below so it persists across Lavalink restarts:
+    oauth:
+      enabled: true
+      # refreshToken: "YOUR_REFRESH_TOKEN"
+    #
+    # Alternative: PoToken + VisitorData (if OAuth doesn't work)
+    # Generate at: https://github.com/iv-org/youtube-trusted-session-generator
+    # pot:
+    #   token: "YOUR_PO_TOKEN"
+    #   visitorData: "YOUR_VISITOR_DATA"
 
   lavasrc:
     providers:
-      - 'scsearch:{title} {author}'
       - 'ytsearch:"{isrc}"'
       - 'ytsearch:{title} {author}'
+      - 'scsearch:{title} {author}'
 
     spotify:
       clientId: ""
       clientSecret: ""
       countryCode: "US"
+      playlistLoadLimit: 10
+      albumLoadLimit: 10
 
     applemusic:
       countryCode: "US"
+      playlistLoadLimit: 10
+      albumLoadLimit: 10
 
     deezer:
       masterDecryptionKey: ""
